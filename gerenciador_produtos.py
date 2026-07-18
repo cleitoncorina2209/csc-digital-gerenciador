@@ -124,13 +124,10 @@ def buscar_dados_pagina(url):
         except (TypeError, ValueError):
             preco = str(preco)
 
+    preco_antigo_json = None  # caso o JSON-LD tambem informe o preco "de antes"
+
     if not preco:
-        frac = soup.find(class_="andes-money-amount__fraction")
-        if frac:
-            preco = frac.get_text(strip=True)
-            cents = soup.find(class_="andes-money-amount__cents")
-            if cents:
-                preco = f"{preco},{cents.get_text(strip=True)}"
+        preco, preco_antigo_json = extrair_precos_da_pagina(soup)
 
     if not (titulo or imagem or preco):
         return {"erro": "Nao encontrei nada nessa pagina."}
@@ -139,7 +136,51 @@ def buscar_dados_pagina(url):
         "titulo": titulo or "",
         "imagem": imagem or "",
         "preco": limpar_preco(preco) if preco else "",
+        "precoAntigo": limpar_preco(preco_antigo_json) if preco_antigo_json else "",
     }
+
+
+def extrair_precos_da_pagina(soup):
+    """Le os precos direto do HTML da pagina, diferenciando o preco
+    RISCADO (antigo/original) do preco ATUAL (o que realmente se paga).
+
+    O Mercado Livre mostra os dois preços com a mesma classe CSS
+    (andes-money-amount__fraction), entao pegar so o primeiro que
+    aparece no codigo da pagina pega errado (o riscado costuma vir
+    primeiro). Aqui a gente verifica se o preco esta dentro de uma
+    tag <s>/<del> ou de um elemento com classe "previous" - isso
+    indica que e o preco riscado, nao o atual.
+    """
+    atual = None
+    antigo = None
+
+    for frac in soup.find_all(class_="andes-money-amount__fraction"):
+        eh_riscado = False
+        for ancestral in frac.parents:
+            if getattr(ancestral, "name", None) in ("s", "del"):
+                eh_riscado = True
+                break
+            classes = ancestral.get("class", []) if hasattr(ancestral, "get") else []
+            if classes and any("previous" in c for c in classes):
+                eh_riscado = True
+                break
+
+        valor = frac.get_text(strip=True)
+        container = frac.find_parent(class_=lambda c: bool(c) and "andes-money-amount" in c)
+        if container:
+            cents_el = container.find(class_="andes-money-amount__cents")
+            if cents_el:
+                valor = f"{valor},{cents_el.get_text(strip=True)}"
+
+        if eh_riscado and antigo is None:
+            antigo = valor
+        elif not eh_riscado and atual is None:
+            atual = valor
+
+        if atual and antigo:
+            break
+
+    return atual, antigo
 
 
 def carregar_catalogo():
@@ -372,6 +413,7 @@ PAGINA_HTML = """<!DOCTYPE html>
         document.getElementById('input-titulo').value = dados.titulo || '';
         document.getElementById('input-imagem').value = dados.imagem || '';
         document.getElementById('input-preco-atual').value = dados.preco || '';
+        document.getElementById('input-preco-antigo').value = dados.precoAntigo || '';
 
         const preview = document.getElementById('preview');
         if (dados.imagem) {
