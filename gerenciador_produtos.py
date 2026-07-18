@@ -43,6 +43,54 @@ CABECALHOS = {
 app = Flask(__name__)
 CORS(app)  # libera o Netlify (ou qualquer site) buscar os produtos daqui
 
+# Plano B pra quando a pagina nao tiver a categoria oficial do ML (raro, mas
+# pode acontecer). Baseado em palavras que costumam aparecer no titulo.
+CATEGORIAS_PALAVRAS = {
+    "Eletrônicos": ["tv", "smart tv", "fone", "bluetooth", "celular", "smartphone",
+                     "notebook", "câmera", "carregador", "caixa de som", "controle",
+                     "mouse", "teclado", "monitor", "tablet", "smartwatch"],
+    "Casa e Decoração": ["organizador", "luminária", "cortina", "tapete", "panela",
+                          "utensílio", "cama", "travesseiro", "toalha", "cozinha"],
+    "Beleza e Cuidados": ["shampoo", "creme", "perfume", "maquiagem", "escova",
+                           "hidratante", "protetor solar", "batom"],
+    "Esporte e Fitness": ["creatina", "whey", "suplemento", "halter", "tênis",
+                           "academia", "proteína", "yoga", "musculação"],
+    "Brinquedos": ["boneca", "brinquedo", "lego", "pelúcia", "infantil"],
+}
+
+
+def categoria_por_palavras(titulo):
+    if not titulo:
+        return "Outros"
+    titulo_lower = titulo.lower()
+    for categoria, palavras in CATEGORIAS_PALAVRAS.items():
+        if any(p in titulo_lower for p in palavras):
+            return categoria
+    return "Outros"
+
+
+def extrair_categoria_oficial(soup):
+    """O Mercado Livre coloca a categoria do produto (Eletronicos > TVs > ...)
+    num JSON-LD do tipo BreadcrumbList. Pegamos o primeiro nivel (o mais
+    generico), que fica bom pra usar como categoria principal do site."""
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            dados = json.loads(script.string or "")
+        except (TypeError, ValueError):
+            continue
+        itens = dados if isinstance(dados, list) else [dados]
+        for item in itens:
+            if isinstance(item, dict) and item.get("@type") == "BreadcrumbList":
+                elementos = item.get("itemListElement", [])
+                elementos = sorted(elementos, key=lambda x: x.get("position", 0))
+                for el in elementos:
+                    nome = el.get("name")
+                    if not nome and isinstance(el.get("item"), dict):
+                        nome = el["item"].get("name")
+                    if nome:
+                        return nome.strip()
+    return None
+
 
 # ============================================================
 # LOGICA (igual ao montar_produtos.py)
@@ -132,11 +180,14 @@ def buscar_dados_pagina(url):
     if not (titulo or imagem or preco):
         return {"erro": "Nao encontrei nada nessa pagina."}
 
+    categoria = extrair_categoria_oficial(soup) or categoria_por_palavras(titulo)
+
     return {
         "titulo": titulo or "",
         "imagem": imagem or "",
         "preco": limpar_preco(preco) if preco else "",
         "precoAntigo": limpar_preco(preco_antigo_json) if preco_antigo_json else "",
+        "categoria": categoria,
     }
 
 
@@ -232,6 +283,7 @@ def rota_adicionar():
         "precoAntigo": preco_antigo,
         "selo": dados.get("selo", "").strip(),
         "link": dados.get("link", "").strip(),
+        "categoria": dados.get("categoria", "").strip() or "Outros",
     }
 
     if not produto["titulo"] or not produto["link"]:
@@ -314,6 +366,7 @@ PAGINA_HTML = """<!DOCTYPE html>
   .card{ background:var(--card); border:1px solid var(--borda); border-radius:8px; position:relative; overflow:hidden; }
   .card img{ width:100%; aspect-ratio:1/1; object-fit:contain; padding:14px; background:#fff; }
   .card-body{ padding:0 14px 14px; }
+  .card-categoria{ font-size:10.5px; color:var(--azul); font-weight:700; text-transform:uppercase; letter-spacing:0.02em; margin-bottom:3px; }
   .card-titulo{ font-size:13px; line-height:1.35; min-height:34px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:4px; }
   .card-preco{ font-size:17px; font-weight:700; }
   .card-preco-antigo{ font-size:11.5px; color:#999; text-decoration:line-through; margin-right:6px; }
@@ -372,6 +425,11 @@ PAGINA_HTML = """<!DOCTYPE html>
       <label>Selo (opcional, ex: MENOR PRECO)</label>
       <input id="input-selo" type="text">
     </div>
+    <div class="campo">
+      <label>Categoria (detectada automatico, edite se quiser)</label>
+      <input id="input-categoria" type="text" list="lista-categorias" placeholder="Ex: Eletrônicos">
+      <datalist id="lista-categorias"></datalist>
+    </div>
 
     <button class="btn-verde" onclick="salvarProduto()">Salvar produto</button>
   </div>
@@ -414,6 +472,7 @@ PAGINA_HTML = """<!DOCTYPE html>
         document.getElementById('input-imagem').value = dados.imagem || '';
         document.getElementById('input-preco-atual').value = dados.preco || '';
         document.getElementById('input-preco-antigo').value = dados.precoAntigo || '';
+        document.getElementById('input-categoria').value = dados.categoria || '';
 
         const preview = document.getElementById('preview');
         if (dados.imagem) {
@@ -438,6 +497,7 @@ PAGINA_HTML = """<!DOCTYPE html>
       precoAtual: document.getElementById('input-preco-atual').value.trim(),
       precoAntigo: document.getElementById('input-preco-antigo').value.trim(),
       selo: document.getElementById('input-selo').value.trim(),
+      categoria: document.getElementById('input-categoria').value.trim(),
       link: document.getElementById('input-link').value.trim(),
     };
 
@@ -459,7 +519,7 @@ PAGINA_HTML = """<!DOCTYPE html>
   }
 
   function limparFormulario() {
-    ['input-link','input-titulo','input-imagem','input-preco-atual','input-preco-antigo','input-selo']
+    ['input-link','input-titulo','input-imagem','input-preco-atual','input-preco-antigo','input-selo','input-categoria']
       .forEach(id => document.getElementById(id).value = '');
     document.getElementById('preview').classList.add('oculto');
   }
@@ -475,6 +535,8 @@ PAGINA_HTML = """<!DOCTYPE html>
     const grid = document.getElementById('grid');
     document.getElementById('contador').textContent = produtos.length + ' produto(s) no catalogo';
 
+    atualizarListaCategorias(produtos);
+
     if (produtos.length === 0) {
       grid.innerHTML = '<div class="vazio">Nenhum produto ainda. Adicione o primeiro ali em cima.</div>';
       return;
@@ -485,12 +547,19 @@ PAGINA_HTML = """<!DOCTYPE html>
         <button class="btn-remover" onclick="removerProduto(${i})">×</button>
         <img src="${p.imagem}" alt="${p.titulo}">
         <div class="card-body">
+          ${p.categoria ? `<div class="card-categoria">${p.categoria}</div>` : ''}
           <div class="card-titulo">${p.titulo}</div>
           ${p.precoAntigo ? `<span class="card-preco-antigo">R$ ${p.precoAntigo}</span>` : ''}
           <span class="card-preco">R$ ${p.precoAtual}</span>
         </div>
       </div>
     `).join('');
+  }
+
+  function atualizarListaCategorias(produtos) {
+    const categorias = [...new Set(produtos.map(p => p.categoria).filter(Boolean))].sort();
+    const datalist = document.getElementById('lista-categorias');
+    datalist.innerHTML = categorias.map(c => `<option value="${c}">`).join('');
   }
 
   async function carregarInicial() {
