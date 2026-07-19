@@ -43,19 +43,94 @@ CABECALHOS = {
 app = Flask(__name__)
 CORS(app)  # libera o Netlify (ou qualquer site) buscar os produtos daqui
 
+import re
+
 # Plano B pra quando a pagina nao tiver a categoria oficial do ML (raro, mas
 # pode acontecer). Baseado em palavras que costumam aparecer no titulo.
+# Quanto mais palavra por categoria, melhor a precisao - contamos quantas
+# batem em cada categoria e ficamos com a que tiver mais acertos (em vez
+# de so pegar a primeira que aparecer no dicionario).
 CATEGORIAS_PALAVRAS = {
-    "Eletrônicos": ["tv", "smart tv", "fone", "bluetooth", "celular", "smartphone",
-                     "notebook", "câmera", "carregador", "caixa de som", "controle",
-                     "mouse", "teclado", "monitor", "tablet", "smartwatch"],
-    "Casa e Decoração": ["organizador", "luminária", "cortina", "tapete", "panela",
-                          "utensílio", "cama", "travesseiro", "toalha", "cozinha"],
-    "Beleza e Cuidados": ["shampoo", "creme", "perfume", "maquiagem", "escova",
-                           "hidratante", "protetor solar", "batom"],
-    "Esporte e Fitness": ["creatina", "whey", "suplemento", "halter", "tênis",
-                           "academia", "proteína", "yoga", "musculação"],
-    "Brinquedos": ["boneca", "brinquedo", "lego", "pelúcia", "infantil"],
+    "Celulares e Telefones": [
+        "celular", "smartphone", "iphone", "galaxy", "xiaomi", "capinha",
+        "capa de celular", "pelicula de vidro", "power bank", "carregador portatil",
+    ],
+    "Eletrônicos, Áudio e Vídeo": [
+        "tv", "smart tv", "televisor", "fone de ouvido", "fone bluetooth",
+        "caixa de som", "soundbar", "câmera", "camera digital", "drone",
+        "projetor", "antena", "roteador", "smartwatch", "relogio inteligente",
+    ],
+    "Informática": [
+        "notebook", "laptop", "mouse", "teclado", "monitor", "pendrive",
+        "hd externo", "ssd", "placa de video", "processador", "webcam",
+        "impressora", "cabo hdmi", "hub usb",
+    ],
+    "Eletrodomésticos": [
+        "geladeira", "fogão", "micro-ondas", "microondas", "liquidificador",
+        "batedeira", "airfryer", "air fryer", "aspirador", "ventilador",
+        "ferro de passar", "cafeteira", "sanduicheira", "espremedor",
+    ],
+    "Casa, Móveis e Decoração": [
+        "organizador", "luminária", "cortina", "tapete", "cama", "travesseiro",
+        "colchão", "toalha", "cabide", "prateleira", "mesa", "cadeira",
+        "sofá", "espelho", "quadro decorativo", "porta-treco",
+    ],
+    "Utensílios de Cozinha": [
+        "panela", "frigideira", "jogo de talher", "faca", "tábua de corte",
+        "pote hermetico", "garrafa térmica", "copo", "xicara", "utensilio de cozinha",
+    ],
+    "Beleza e Cuidado Pessoal": [
+        "shampoo", "condicionador", "creme", "perfume", "maquiagem", "escova de cabelo",
+        "hidratante", "protetor solar", "batom", "base facial", "secador de cabelo",
+        "chapinha", "depilador", "barbeador", "kit de barba",
+    ],
+    "Esporte e Fitness": [
+        "creatina", "whey protein", "whey", "suplemento", "halter", "kit de peso",
+        "tênis de corrida", "academia", "proteína", "yoga", "musculação",
+        "bicicleta ergométrica", "elástico de exercício", "luva de treino",
+        "corda de pular", "bola de futebol",
+    ],
+    "Brinquedos e Hobbies": [
+        "boneca", "brinquedo", "lego", "pelúcia", "carrinho de brinquedo",
+        "quebra-cabeça", "jogo de tabuleiro", "playmobil", "boneco de acao",
+        "carta pokemon", "carta colecionavel",
+    ],
+    "Moda: Roupas e Acessórios": [
+        "camiseta", "camisa", "calça jeans", "vestido", "jaqueta", "moletom",
+        "shorts", "regata", "boné", "cinto", "meia", "pijama",
+    ],
+    "Calçados e Bolsas": [
+        "tênis", "sapato", "sandália", "chinelo", "bota", "mochila", "bolsa",
+        "carteira", "mala de viagem",
+    ],
+    "Bebês": [
+        "fralda", "mamadeira", "carrinho de bebê", "berço", "chupeta",
+        "banheira de bebê", "cadeirinha de carro", "roupinha de bebê",
+    ],
+    "Ferramentas e Construção": [
+        "furadeira", "parafusadeira", "chave de fenda", "serra", "martelo",
+        "trena", "escada", "parafuso", "tinta", "lâmpada", "fita isolante",
+    ],
+    "Automotivo": [
+        "pneu", "óleo de motor", "bateria automotiva", "capa de banco",
+        "som automotivo", "farol", "palheta de limpador", "tapete automotivo",
+    ],
+    "Instrumentos Musicais": [
+        "violão", "guitarra", "teclado musical", "bateria musical", "microfone",
+        "amplificador", "cavaquinho", "ukulele",
+    ],
+    "Livros e Papelaria": [
+        "livro", "caderno", "caneta", "mochila escolar", "agenda", "estojo escolar",
+        "quadro branco", "calculadora",
+    ],
+    "Pet Shop": [
+        "ração", "coleira", "brinquedo para cachorro", "areia para gato",
+        "aquário", "casinha de cachorro", "shampoo para pet",
+    ],
+    "Games": [
+        "videogame", "console", "controle de video game", "jogo de ps4",
+        "jogo de ps5", "jogo de xbox", "headset gamer", "cadeira gamer",
+    ],
 }
 
 
@@ -63,16 +138,35 @@ def categoria_por_palavras(titulo):
     if not titulo:
         return "Outros"
     titulo_lower = titulo.lower()
+
+    melhor_categoria = "Outros"
+    melhor_pontuacao = 0
+
     for categoria, palavras in CATEGORIAS_PALAVRAS.items():
-        if any(p in titulo_lower for p in palavras):
-            return categoria
-    return "Outros"
+        pontuacao = 0
+        for palavra in palavras:
+            # \b garante que "creme" nao vai casar dentro de outra palavra
+            if re.search(r"\b" + re.escape(palavra) + r"\b", titulo_lower):
+                pontuacao += 1
+        if pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor_categoria = categoria
+
+    return melhor_categoria
+
+
+# Palavras que aparecem em breadcrumbs mas NAO sao categoria de produto -
+# se a categoria detectada for uma dessas, ignoramos e tentamos a proxima.
+BREADCRUMB_IGNORAR = {
+    "voltar ao anúncio", "voltar para a busca", "início", "inicio",
+    "mercado livre", "página inicial",
+}
 
 
 def extrair_categoria_oficial(soup):
     """O Mercado Livre coloca a categoria do produto (Eletronicos > TVs > ...)
-    num JSON-LD do tipo BreadcrumbList. Pegamos o primeiro nivel (o mais
-    generico), que fica bom pra usar como categoria principal do site."""
+    num JSON-LD do tipo BreadcrumbList. Pegamos o primeiro nivel valido (o
+    mais generico), que fica bom pra usar como categoria principal do site."""
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             dados = json.loads(script.string or "")
@@ -87,8 +181,17 @@ def extrair_categoria_oficial(soup):
                     nome = el.get("name")
                     if not nome and isinstance(el.get("item"), dict):
                         nome = el["item"].get("name")
-                    if nome:
+                    if nome and nome.strip().lower() not in BREADCRUMB_IGNORAR:
                         return nome.strip()
+
+    # plano B: breadcrumb visivel no HTML (algumas paginas nao tem JSON-LD)
+    breadcrumb = soup.find(class_=lambda c: bool(c) and "breadcrumb" in c)
+    if breadcrumb:
+        for link in breadcrumb.find_all(["a", "li", "span"]):
+            texto = link.get_text(strip=True)
+            if texto and texto.lower() not in BREADCRUMB_IGNORAR and len(texto) > 2:
+                return texto
+
     return None
 
 
@@ -377,6 +480,21 @@ PAGINA_HTML = """<!DOCTYPE html>
   }
   .vazio{ text-align:center; color:#999; padding:40px 0; grid-column:1/-1; }
   .contador{ font-size:13px; color:var(--texto-claro); margin-bottom:14px; }
+
+  @media (max-width:600px){
+    .container{ padding:16px 12px 60px; }
+    .painel{ padding:16px; }
+    .grupo-2{ grid-template-columns:1fr; gap:0; }
+    .linha{ flex-direction:column; }
+    .linha button{ width:100%; }
+    .btn-verde{ width:100%; }
+    .grid{ grid-template-columns:repeat(2, 1fr); gap:10px; }
+    .topbar .logo{ font-size:16px; }
+  }
+  @media (max-width:360px){
+    .grid{ grid-template-columns:1fr 1fr; gap:8px; }
+    .card img{ padding:10px; }
+  }
 </style>
 </head>
 <body>
