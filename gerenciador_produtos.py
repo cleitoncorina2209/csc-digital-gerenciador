@@ -27,7 +27,9 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify, request
+from functools import wraps
+
+from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 
 PASTA = Path(__file__).parent
@@ -43,6 +45,32 @@ CABECALHOS = {
 
 app = Flask(__name__)
 CORS(app)  # libera o Netlify (ou qualquer site) buscar os produtos daqui
+
+# ============================================================
+# LOGIN
+# ------------------------------------------------------------
+# Configure a variavel de ambiente PAINEL_SENHA no Render pra
+# proteger o gerenciador. Se ela nao estiver configurada (ex:
+# testando na sua maquina), o login fica desativado - ninguem
+# precisa de senha, igual era antes.
+#
+# A leitura publica (GET /api/produtos), que a landing page usa,
+# NUNCA exige login - senao o site para de funcionar pra visitantes.
+# ============================================================
+
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
+PAINEL_SENHA = os.environ.get("PAINEL_SENHA", "")
+
+
+def requer_login(func):
+    @wraps(func)
+    def decorada(*args, **kwargs):
+        if PAINEL_SENHA and not session.get("autenticado"):
+            if request.path.startswith("/api/"):
+                return jsonify({"erro": "Sessao expirada, faca login de novo."}), 401
+            return redirect("/login")
+        return func(*args, **kwargs)
+    return decorada
 
 import re
 
@@ -439,6 +467,7 @@ def _github_salvar(catalogo):
 # ============================================================
 
 @app.route("/api/buscar", methods=["POST"])
+@requer_login
 def rota_buscar():
     url = (request.json or {}).get("url", "").strip()
     if not url:
@@ -449,10 +478,13 @@ def rota_buscar():
 
 @app.route("/api/produtos", methods=["GET"])
 def rota_listar():
+    # SEM @requer_login de proposito - a landing page publica precisa
+    # conseguir ler os produtos sem estar logada.
     return jsonify(carregar_catalogo())
 
 
 @app.route("/api/produtos", methods=["POST"])
+@requer_login
 def rota_adicionar():
     dados = request.json or {}
     catalogo = carregar_catalogo()
@@ -480,6 +512,7 @@ def rota_adicionar():
 
 
 @app.route("/api/produtos/<int:indice>", methods=["DELETE"])
+@requer_login
 def rota_remover(indice):
     catalogo = carregar_catalogo()
     if 0 <= indice < len(catalogo):
@@ -581,7 +614,10 @@ PAGINA_HTML = """<!DOCTYPE html>
 </head>
 <body>
 
-<div class="topbar"><div class="logo">CSC<span>.Digital</span> · Gerenciar Produtos</div></div>
+<div class="topbar">
+  <div class="logo">CSC<span>.Digital</span> · Gerenciar Produtos</div>
+  <a href="/logout" style="margin-left:auto; font-size:12.5px; color:#333; text-decoration:underline;">Sair</a>
+</div>
 
 <div class="container">
 
@@ -775,7 +811,79 @@ PAGINA_HTML = """<!DOCTYPE html>
 """
 
 
+PAGINA_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login · CSC.Digital</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background:#EBEBEB; font-family:'Inter',sans-serif; color:#333;
+    min-height:100vh; display:flex; align-items:center; justify-content:center;
+  }
+  .caixa{
+    background:#fff; border:1px solid #E0E0E0; border-radius:10px;
+    padding:32px 28px; width:100%; max-width:340px;
+  }
+  .logo{ font-weight:800; font-size:20px; text-align:center; margin-bottom:6px; }
+  .logo span{ color:#2968C8; }
+  .subtitulo{ text-align:center; font-size:13px; color:#666; margin-bottom:22px; }
+  label{ font-size:12.5px; color:#666; font-weight:600; display:block; margin-bottom:5px; }
+  input{
+    width:100%; padding:11px 12px; border:1px solid #E0E0E0; border-radius:6px;
+    font-size:14px; font-family:'Inter',sans-serif; margin-bottom:14px;
+  }
+  input:focus{ outline:none; border-color:#3483FA; }
+  button{
+    width:100%; background:#3483FA; color:#fff; border:none; border-radius:6px;
+    padding:11px 0; font-weight:600; font-size:14px; cursor:pointer;
+  }
+  button:hover{ background:#2968C8; }
+  .erro{
+    background:#FDECEA; color:#E53935; font-size:13px; padding:9px 12px;
+    border-radius:6px; margin-bottom:14px;
+  }
+</style>
+</head>
+<body>
+  <div class="caixa">
+    <div class="logo">CSC<span>.Digital</span></div>
+    <div class="subtitulo">Gerenciar Produtos</div>
+    __ERRO__
+    <form method="POST">
+      <label>Senha</label>
+      <input type="password" name="senha" autofocus>
+      <button type="submit">Entrar</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def rota_login():
+    erro_html = ""
+    if request.method == "POST":
+        senha = request.form.get("senha", "")
+        if not PAINEL_SENHA or senha == PAINEL_SENHA:
+            session["autenticado"] = True
+            return redirect("/")
+        erro_html = '<div class="erro">Senha incorreta, tenta de novo.</div>'
+    return PAGINA_LOGIN_HTML.replace("__ERRO__", erro_html)
+
+
+@app.route("/logout")
+def rota_logout():
+    session.pop("autenticado", None)
+    return redirect("/login")
+
+
 @app.route("/")
+@requer_login
 def rota_index():
     return PAGINA_HTML
 
