@@ -17,6 +17,7 @@ Salva tudo em "produtos.json", igual antes - continua funcionando
 com o achadinhos.html sem precisar mudar nada la.
 """
 
+import base64
 import json
 import os
 import threading
@@ -338,6 +339,10 @@ def extrair_precos_da_pagina(soup):
 
 
 def carregar_catalogo():
+    if GITHUB_TOKEN:
+        return _github_carregar()
+
+    # sem GITHUB_TOKEN configurado (ex: testando na sua maquina) - usa arquivo local
     if ARQ_SAIDA_JSON.exists():
         try:
             with open(ARQ_SAIDA_JSON, encoding="utf-8") as f:
@@ -348,8 +353,85 @@ def carregar_catalogo():
 
 
 def salvar_catalogo(catalogo):
+    if GITHUB_TOKEN:
+        _github_salvar(catalogo)
+        return
+
     with open(ARQ_SAIDA_JSON, "w", encoding="utf-8") as f:
         json.dump(catalogo, f, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+# ARMAZENAMENTO NO GITHUB
+# ------------------------------------------------------------
+# O Render (plano gratis) apaga os arquivos salvos localmente
+# sempre que o servidor "dorme" e "acorda" de novo. Pra nao
+# perder o catalogo, a gente salva o produtos.json direto no
+# repositorio do GitHub - que nunca se apaga.
+#
+# Precisa configurar 2 variaveis de ambiente no Render:
+#   GITHUB_TOKEN -> um token de acesso pessoal do GitHub
+#   GITHUB_REPO  -> "seu-usuario/nome-do-repo"
+# ============================================================
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+GITHUB_ARQUIVO = "produtos.json"
+
+
+def _github_url():
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_ARQUIVO}"
+
+
+def _github_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def _github_carregar():
+    try:
+        resp = requests.get(_github_url(), headers=_github_headers(),
+                             params={"ref": GITHUB_BRANCH}, timeout=10)
+    except requests.RequestException:
+        return []
+
+    if resp.status_code == 404:
+        return []  # arquivo ainda nao existe no repo - catalogo vazio
+    if resp.status_code != 200:
+        return []
+
+    conteudo_b64 = resp.json().get("content", "")
+    try:
+        conteudo = base64.b64decode(conteudo_b64).decode("utf-8")
+        return json.loads(conteudo)
+    except (ValueError, json.JSONDecodeError):
+        return []
+
+
+def _github_salvar(catalogo):
+    conteudo_str = json.dumps(catalogo, ensure_ascii=False, indent=2)
+    conteudo_b64 = base64.b64encode(conteudo_str.encode("utf-8")).decode("utf-8")
+
+    # precisa do "sha" atual do arquivo pra poder atualizar (o GitHub exige isso)
+    sha = None
+    resp_get = requests.get(_github_url(), headers=_github_headers(),
+                             params={"ref": GITHUB_BRANCH}, timeout=10)
+    if resp_get.status_code == 200:
+        sha = resp_get.json().get("sha")
+
+    body = {
+        "message": "Atualiza produtos.json via gerenciador",
+        "content": conteudo_b64,
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+
+    resp_put = requests.put(_github_url(), headers=_github_headers(), json=body, timeout=10)
+    resp_put.raise_for_status()
 
 
 # ============================================================
