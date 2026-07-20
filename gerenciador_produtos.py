@@ -61,6 +61,10 @@ CORS(app)  # libera o Netlify (ou qualquer site) buscar os produtos daqui
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 PAINEL_SENHA = os.environ.get("PAINEL_SENHA", "")
 
+# Token separado do login normal - usado pelo robo externo (GitHub Actions)
+# que atualiza os precos periodicamente, sem precisar de sessao de navegador.
+ROBO_TOKEN = os.environ.get("ROBO_TOKEN", "")
+
 
 def requer_login(func):
     @wraps(func)
@@ -483,17 +487,12 @@ def rota_listar():
     return jsonify(carregar_catalogo())
 
 
-@app.route("/api/produtos", methods=["POST"])
-@requer_login
-def rota_adicionar():
-    dados = request.json or {}
-    catalogo = carregar_catalogo()
-
+def montar_produto_a_partir_dos_dados(dados):
     preco_atual = limpar_preco(dados.get("precoAtual", ""))
     preco_antigo = limpar_preco(dados.get("precoAntigo", ""))
     preco_atual, preco_antigo = corrigir_ordem_precos(preco_atual, preco_antigo)
 
-    produto = {
+    return {
         "titulo": dados.get("titulo", "").strip(),
         "imagem": dados.get("imagem", "").strip(),
         "precoAtual": preco_atual,
@@ -501,12 +500,52 @@ def rota_adicionar():
         "selo": dados.get("selo", "").strip(),
         "link": dados.get("link", "").strip(),
         "categoria": dados.get("categoria", "").strip() or "Outros",
+        "destaque": bool(dados.get("destaque", False)),
     }
+
+
+@app.route("/api/produtos", methods=["POST"])
+@requer_login
+def rota_adicionar():
+    dados = request.json or {}
+    catalogo = carregar_catalogo()
+    produto = montar_produto_a_partir_dos_dados(dados)
 
     if not produto["titulo"] or not produto["link"]:
         return jsonify({"erro": "Titulo e link sao obrigatorios."}), 400
 
+    duplicado_indice = None
+    for i, p in enumerate(catalogo):
+        if p.get("link") == produto["link"]:
+            duplicado_indice = i
+            break
+
+    if duplicado_indice is not None and not dados.get("forcarDuplicado"):
+        return jsonify({
+            "aviso_duplicado": True,
+            "produto_existente": catalogo[duplicado_indice],
+            "indice_existente": duplicado_indice,
+        }), 409
+
     catalogo.append(produto)
+    salvar_catalogo(catalogo)
+    return jsonify(carregar_catalogo())
+
+
+@app.route("/api/produtos/<int:indice>", methods=["PUT"])
+@requer_login
+def rota_editar(indice):
+    dados = request.json or {}
+    catalogo = carregar_catalogo()
+
+    if not (0 <= indice < len(catalogo)):
+        return jsonify({"erro": "Produto nao encontrado."}), 404
+
+    produto = montar_produto_a_partir_dos_dados(dados)
+    if not produto["titulo"] or not produto["link"]:
+        return jsonify({"erro": "Titulo e link sao obrigatorios."}), 400
+
+    catalogo[indice] = produto
     salvar_catalogo(catalogo)
     return jsonify(carregar_catalogo())
 
@@ -520,6 +559,50 @@ def rota_remover(indice):
         salvar_catalogo(catalogo)
         return jsonify(catalogo)
     return jsonify({"erro": "Produto nao encontrado."}), 404
+
+
+@app.route("/api/atualizar-precos", methods=["POST"])
+def rota_atualizar_precos():
+    """Revisita cada produto salvo e atualiza o preco se ele tiver mudado
+    no Mercado Livre. Chamado por um robo externo (GitHub Actions), por
+    isso usa um token proprio em vez do login normal do navegador."""
+    token_recebido = request.headers.get("X-Robo-Token", "")
+    if not ROBO_TOKEN or token_recebido != ROBO_TOKEN:
+        return jsonify({"erro": "Token invalido ou nao configurado."}), 401
+
+    catalogo = carregar_catalogo()
+    atualizados = []
+
+    for produto in catalogo:
+        link = produto.get("link", "")
+        if not link:
+            continue
+
+        resultado = buscar_dados_pagina(link)
+        if resultado.get("erro"):
+            continue
+
+        preco_novo = limpar_preco(resultado.get("preco", ""))
+        if not preco_novo or preco_novo == produto.get("precoAtual"):
+            continue
+
+        preco_antigo_novo = limpar_preco(resultado.get("precoAntigo", "")) or produto.get("precoAntigo", "")
+        preco_novo, preco_antigo_novo = corrigir_ordem_precos(preco_novo, preco_antigo_novo)
+
+        produto["precoAtual"] = preco_novo
+        produto["precoAntigo"] = preco_antigo_novo
+        atualizados.append(produto["titulo"])
+
+        time.sleep(1)  # educado com o Mercado Livre, evita bloqueio por excesso de chamadas
+
+    if atualizados:
+        salvar_catalogo(catalogo)
+
+    return jsonify({
+        "total_produtos": len(catalogo),
+        "precos_atualizados": len(atualizados),
+        "produtos_atualizados": atualizados,
+    })
 
 
 # ============================================================
@@ -588,11 +671,18 @@ PAGINA_HTML = """<!DOCTYPE html>
   .card-titulo{ font-size:13px; line-height:1.35; min-height:34px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:4px; }
   .card-preco{ font-size:17px; font-weight:700; }
   .card-preco-antigo{ font-size:11.5px; color:#999; text-decoration:line-through; margin-right:6px; }
+  .card-destaque{ font-size:10.5px; color:#B8860B; font-weight:700; margin-bottom:3px; }
   .btn-remover{
     position:absolute; top:8px; right:8px; width:26px; height:26px; border-radius:50%;
     background:var(--vermelho); color:#fff; font-weight:700; font-size:14px; line-height:1;
     display:flex; align-items:center; justify-content:center; border:none; cursor:pointer;
   }
+  .btn-editar{
+    position:absolute; top:8px; right:40px; width:26px; height:26px; border-radius:50%;
+    background:var(--azul); color:#fff; font-weight:700; font-size:12px; line-height:1;
+    display:flex; align-items:center; justify-content:center; border:none; cursor:pointer;
+  }
+  .oculto{ display:none; }
   .vazio{ text-align:center; color:#999; padding:40px 0; grid-column:1/-1; }
   .contador{ font-size:13px; color:var(--texto-claro); margin-bottom:14px; }
 
@@ -666,8 +756,16 @@ PAGINA_HTML = """<!DOCTYPE html>
       <input id="input-categoria" type="text" list="lista-categorias" placeholder="Ex: Eletrônicos">
       <datalist id="lista-categorias"></datalist>
     </div>
+    <div class="campo" style="display:flex; align-items:center; gap:8px;">
+      <input id="input-destaque" type="checkbox" style="width:auto;">
+      <label style="margin:0;" for="input-destaque">Marcar como destaque (aparece primeiro na landing page)</label>
+    </div>
 
-    <button class="btn-verde" onclick="salvarProduto()">Salvar produto</button>
+    <input type="hidden" id="input-editando-indice" value="">
+    <div style="display:flex; gap:10px;">
+      <button class="btn-verde" id="btn-salvar" onclick="salvarProduto()" style="flex:1;">Salvar produto</button>
+      <button class="btn-ghost oculto" id="btn-cancelar-edicao" onclick="cancelarEdicao()">Cancelar</button>
+    </div>
   </div>
 
   <div class="contador" id="contador">Carregando...</div>
@@ -725,7 +823,9 @@ PAGINA_HTML = """<!DOCTYPE html>
     btn.textContent = 'Buscar dados';
   }
 
-  async function salvarProduto() {
+  let catalogoAtual = [];
+
+  async function salvarProduto(forcarDuplicado) {
     esconderErro();
     const produto = {
       titulo: document.getElementById('input-titulo').value.trim(),
@@ -735,18 +835,35 @@ PAGINA_HTML = """<!DOCTYPE html>
       selo: document.getElementById('input-selo').value.trim(),
       categoria: document.getElementById('input-categoria').value.trim(),
       link: document.getElementById('input-link').value.trim(),
+      destaque: document.getElementById('input-destaque').checked,
     };
+    if (forcarDuplicado) produto.forcarDuplicado = true;
 
     if (!produto.titulo || !produto.link) {
       mostrarErro('Preencha pelo menos o titulo e o link.');
       return;
     }
 
-    const resp = await fetch('/api/produtos', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+    const indiceEditando = document.getElementById('input-editando-indice').value;
+    const editando = indiceEditando !== '';
+
+    const url = editando ? '/api/produtos/' + indiceEditando : '/api/produtos';
+    const metodo = editando ? 'PUT' : 'POST';
+
+    const resp = await fetch(url, {
+      method: metodo, headers: {'Content-Type':'application/json'},
       body: JSON.stringify(produto)
     });
     const dados = await resp.json();
+
+    if (resp.status === 409 && dados.aviso_duplicado) {
+      const confirmou = confirm(
+        'Já existe um produto cadastrado com esse mesmo link:\n"' + dados.produto_existente.titulo + '"\n\n' +
+        'Cadastrar mesmo assim (vai duplicar)?'
+      );
+      if (confirmou) await salvarProduto(true);
+      return;
+    }
 
     if (dados.erro) { mostrarErro(dados.erro); return; }
 
@@ -754,9 +871,37 @@ PAGINA_HTML = """<!DOCTYPE html>
     renderizarGrid(dados);
   }
 
+  function editarProduto(indice) {
+    const p = catalogoAtual[indice];
+    if (!p) return;
+
+    document.getElementById('input-link').value = p.link || '';
+    document.getElementById('input-titulo').value = p.titulo || '';
+    document.getElementById('input-imagem').value = p.imagem || '';
+    document.getElementById('input-preco-atual').value = p.precoAtual || '';
+    document.getElementById('input-preco-antigo').value = p.precoAntigo || '';
+    document.getElementById('input-selo').value = p.selo || '';
+    document.getElementById('input-categoria').value = p.categoria || '';
+    document.getElementById('input-destaque').checked = !!p.destaque;
+    document.getElementById('input-editando-indice').value = indice;
+
+    document.getElementById('btn-salvar').textContent = 'Salvar edição';
+    document.getElementById('btn-cancelar-edicao').classList.remove('oculto');
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelarEdicao() {
+    limparFormulario();
+  }
+
   function limparFormulario() {
     ['input-link','input-titulo','input-imagem','input-preco-atual','input-preco-antigo','input-selo','input-categoria']
       .forEach(id => document.getElementById(id).value = '');
+    document.getElementById('input-destaque').checked = false;
+    document.getElementById('input-editando-indice').value = '';
+    document.getElementById('btn-salvar').textContent = 'Salvar produto';
+    document.getElementById('btn-cancelar-edicao').classList.add('oculto');
     document.getElementById('preview').classList.add('oculto');
   }
 
@@ -768,6 +913,7 @@ PAGINA_HTML = """<!DOCTYPE html>
   }
 
   function renderizarGrid(produtos) {
+    catalogoAtual = produtos;
     const grid = document.getElementById('grid');
     document.getElementById('contador').textContent = produtos.length + ' produto(s) no catalogo';
 
@@ -780,9 +926,11 @@ PAGINA_HTML = """<!DOCTYPE html>
 
     grid.innerHTML = produtos.map((p, i) => `
       <div class="card">
-        <button class="btn-remover" onclick="removerProduto(${i})">×</button>
+        <button class="btn-remover" onclick="removerProduto(${i})" title="Remover">×</button>
+        <button class="btn-editar" onclick="editarProduto(${i})" title="Editar">✎</button>
         <img src="${p.imagem}" alt="${p.titulo}">
         <div class="card-body">
+          ${p.destaque ? `<div class="card-destaque">★ Destaque</div>` : ''}
           ${p.categoria ? `<div class="card-categoria">${p.categoria}</div>` : ''}
           <div class="card-titulo">${p.titulo}</div>
           ${p.precoAntigo ? `<span class="card-preco-antigo">R$ ${p.precoAntigo}</span>` : ''}
